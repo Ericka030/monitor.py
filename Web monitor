@@ -1,24 +1,17 @@
 
 #Language use: Python
-#No SSL was used for this code, the code primarily focuses on making plain HTTP requests.
 #VS Code was used
 
 
 
 import socket
-import hashlib
 import time
 from urllib.parse import urlparse
 import re
-
-# Read URLs from a file
-with open('urls-file.txt', 'r') as file:
-    urls = file.readlines()
-
-cleaned_urls = [url.strip() for url in urls]
+import sys
 
 # Function to establish a TCP connection
-def establish_tcp_connection(url):
+def establish_tcp_connection(url):   
     try:
         parsed_url = urlparse(url)
         host = parsed_url.netloc
@@ -29,30 +22,31 @@ def establish_tcp_connection(url):
         # Create a TCP socket
         client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         client_socket.connect((host, port))
-        return client_socket
+        return client_socket, host, parsed_url.path
     except Exception as e:
         print(f"URL: {url}\nStatus: Network Error")
-        return None
+        return None, None, None
 
 # Function to send an HTTP request message
-def send_http_request(client_socket, path):
+def send_http_request(client_socket, host, path):
     try:
         request_message = f"GET {path} HTTP/1.1\r\nHost: {host}\r\n\r\n"
         client_socket.send(request_message.encode())
         return True
     except Exception as e:
-        print(f"URL: {url}\nStatus: Network Error")
+        print(f"URL: {host}{path}\nStatus: Network Error")
         return False
 
-# Function to receive and analyze HTTP response
-def analyze_http_response(client_socket):
+# Function to analyze HTTP response
+def analyze_http_response(client_socket, url, path):
     try:
         response = client_socket.recv(4096).decode()
-        
+
         # Extract the status line from the response
-        status_line = re.search(r'HTTP/1\.1 (\d{3} [A-Za-z ]+)', response)
+        status_line = re.search(r'HTTP/1\.1 (\d{3})', response)
         if status_line:
-            status_code, status_text = status_line.group(0).split(' ', 1)
+            status_code = status_line.group(1)
+            status_text = response.split('\n')[0][len(status_code) + 4:]
             print(f"URL: {url}\nStatus: {status_code} {status_text}")
             
             # Handle redirection (3XX)
@@ -62,44 +56,66 @@ def analyze_http_response(client_socket):
                     redirected_url = location_header.group(1).strip()
                     print(f"Redirected URL: {redirected_url}")
                     client_socket.close()
-                    client_socket = establish_tcp_connection(redirected_url)
+                    client_socket, host, path = establish_tcp_connection(redirected_url)
                     if client_socket:
-                        send_http_request(client_socket, path)
-                        return analyze_http_response(client_socket)
+                        send_http_request(client_socket, host, path)
+                        return analyze_http_response(client_socket, redirected_url, path)
             
             # Handle referenced objects (images)
             if status_code.startswith('2'):
-                images = re.findall(r'<img .*?src=["\'](https?://[^"\']+)["\'].*?>', response)
+                images = parseBodyImages(response)
                 for image_url in images:
                     print(f"Referenced URL: {image_url}")
-                    image_socket = establish_tcp_connection(image_url)
+                    image_socket, image_host, image_path = establish_tcp_connection(image_url)
                     if image_socket:
-                        send_http_request(image_socket, '/')
-                        image_status = analyze_http_response(image_socket)
+                        send_http_request(image_socket, image_host, image_path)
+                        image_status = analyze_http_response(image_socket, image_url, image_path)
                         image_socket.close()
                         print(f"Image Status: {image_status}")
-        
-        return None
+
+            # Parse and display response headers
+            parseHeaders(response)
+
+        return status_code
     except Exception as e:
         return "Network Error"
 
-# Function to monitor the website
-def monitor(url):
-    client_socket = establish_tcp_connection(url)
-    if client_socket:
-        parsed_url = urlparse(url)
-        global host
-        host = parsed_url.netloc
-        global path
-        path = parsed_url.path
-        while True:
-            if send_http_request(client_socket, path):
-                analyze_http_response(client_socket)
-            time.sleep(300)
+# Function to parse HTTP response headers
+def parseHeaders(response):
+    headers = response.split('\r\n\r\n')[0]  # Split headers from the body
+    print("Response Headers:")
+    print(headers)
+
+# Function to parse images in the HTTP response body
+def parseBodyImages(response):
+    images = re.findall(r'<img .*?src=["\'](https?://[^"\']+)["\'].*?>', response)
+    return images
+
+# Function to monitor multiple websites
+def monitor(urls):
+    for url in urls:
+        client_socket, host, path = establish_tcp_connection(url)
+        if client_socket:
+            while True:
+                status_code = send_http_request(client_socket, host, path)
+                if status_code:
+                    status_code = analyze_http_response(client_socket, url, path)
+                    if status_code is None:
+                        break
+                time.sleep(5)
+        else:
+            print(f"Failed to establish a connection for URL: {url}")
 
 if __name__ == "__main__":
-    for url in cleaned_urls:
-        monitor(url)
-        print("Website content has changed!")
+    if len(sys.argv) != 2:
+        print("Usage: python monitor.py urls-file.txt")
+        sys.exit(1)   
+
+    urls_file = sys.argv[1]
+
+    with open(urls_file, 'r') as file:
+        urls = file.readlines()
+        cleaned_urls = [url.strip() for url in urls]
+        monitor(cleaned_urls)
 
 
